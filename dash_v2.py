@@ -10,6 +10,17 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+# ===== 44대 중분류 고정 순서(사용자 지정 정렬 및 레이더용) =====
+CATEGORY_ORDER = [
+    "태양광","태양열","풍력","해양에너지","수력","지열","바이오에너지","연료전지","청정화력 발전·효율화",
+    "원자력발전","핵융합발전","수소제조","수소저장","폐기물","전력저장","신재생에너지 하이브리드","산업효율화",
+    "수송효율화","건축효율화","CCUS","Non-CO2 저감","송배전 시스템","전기지능화 기기","기후예측 및 모델링",
+    "기후 정보 & 경보 시스템","감염 질병 관리","식품 안전 예방","수자원 확보 및 공급","수재해 관리","수계·수생태계",
+    "수처리","연안재해 관리","유전자원&유전개량","작물재배&생산","가축질병관리","가공, 저장&유통","수산자원",
+    "산림 피해 저감","생태 모니터링 & 복원","산림 생산 증진","해양생태계","저전력 소모 장비","에너지 하베스팅","인공광합성"
+]
+CATEGORY_INDEX = {cat: i+1 for i, cat in enumerate(CATEGORY_ORDER)}  # 순위 고정용
+
 # 페이지 설정
 st.set_page_config(
     page_title="🌍 기후기술 수준조사 통계정보 대시보드",
@@ -441,6 +452,24 @@ def main():
     elif analysis_type == "🌏 국가별 경쟁력":
         st.subheader("🌏 국가별 경쟁력")
 
+        # ▼▼▼ 추가: 국가별 경쟁력 전용 범위 선택 및 필터 ▼▼▼
+        scope = st.selectbox(
+            "📊 분석 범위 선택:",
+            ['전체', '감축기술', '적응기술'],
+            key="scope_country_competition"
+        )
+
+        # 중분류 레벨 DF(=category_data)에서 범위 필터
+        if scope == '전체':
+            scoped_cat = category_data.copy()
+        elif scope == '감축기술':
+            scoped_cat = category_data[category_data['type'] == '감축'].copy()
+        else:
+            scoped_cat = category_data[category_data['type'] == '적응'].copy()
+
+        # 세부기술 레벨 DF 별칭 (df가 세부기술 단위임)
+        detail_data = df  # 레이더/막대에서 참조하기 위해 명시적 별칭
+
         # ─── 스토리보드(유지) ───
         st.markdown("""
         <div class="story-box">
@@ -461,14 +490,15 @@ def main():
 
         wide_left, narrow_right = st.columns([2, 1], gap="large")
 
-        # (좌) 종합 비교분석 - 전체 중분류 현황 (안정화 렌더링)
+        # (좌) 종합 비교분석 - 전체 중분류 현황 (클릭 정렬 가능 버전)
         with wide_left:
             st.markdown("#### 📊 종합 비교분석 - 전체 중분류 현황")
 
-            # 1) 숫자 전용 DF 구성
+            # 1) 숫자 전용 DF (범위 필터 반영: scoped_cat 사용)
             rows_num = []
-            for _, r in category_data.iterrows():
+            for _, r in scoped_cat.iterrows():
                 rows_num.append({
+                    '순위': CATEGORY_INDEX.get(r['tech_category'], 9999),
                     '구분': "⚡ 감축" if r['type'] == '감축' else "🛡️ 적응",
                     '중분류': r['tech_category'],
                     'KR': float(r.get('kr_tech_level', float('nan'))),
@@ -476,60 +506,82 @@ def main():
                     'JP': float(r.get('jp_tech_level', float('nan'))),
                     'US': float(r.get('us_tech_level', float('nan'))),
                     'EU': float(r.get('eu_tech_level', float('nan'))),
-                    '최고보유국': r.get('leading_country', None)
+                    '최고보유국': r.get('leading_country', None),
                 })
             num_df = pd.DataFrame(rows_num)
 
-            # 2) 정렬 및 순위(한국 기준)
-            num_df = num_df.sort_values('KR', ascending=False).reset_index(drop=True)
-            num_df['순위'] = range(1, len(num_df) + 1)
+            # 2) 기본은 44대 고정 순서
+            num_df = num_df.sort_values(['순위', '중분류']).reset_index(drop=True)
 
-            # 3) 표시용 DF (문자열)
-            disp_df = num_df.copy()
-            for col in ['KR', 'CN', 'JP', 'US', 'EU']:
-                disp_df[col] = disp_df[col].apply(lambda v: f"{float(v):.1f}%" if v == v else "-")  # NaN 체크: v==v
+            # 3) 숫자형 보장
+            value_cols = ["KR", "CN", "JP", "US", "EU"]
+            num_df[value_cols] = num_df[value_cols].apply(pd.to_numeric, errors="coerce")
 
-            disp_df = disp_df.rename(columns={'KR': '한국', 'CN': '중국', 'JP': '일본', 'US': '미국', 'EU': 'EU'})
-            disp_df = disp_df[['순위', '구분', '중분류', '한국', '중국', '일본', '미국', 'EU', '최고보유국']]
-            disp_df = disp_df.fillna("-").astype(str)
+            # 4) 행별 최고값 하이라이트 + 자리수 포맷(%.1f%) + 결측 대시
+            def highlight_row_max(row):
+                cols = ['KR', 'CN', 'JP', 'US', 'EU']
+                vals = {c: row[c] for c in cols if pd.notna(row[c])}
+                max_val = max(vals.values()) if vals else None
+                out = []
+                for col in row.index:
+                    if max_val is not None and col in cols and pd.notna(row[col]) and row[col] == max_val:
+                        out.append('background-color: #FFF3BF; font-weight: 600;')
+                    else:
+                        out.append('')
+                return out
 
-            # 4) React #185 회피: HTML 테이블로 렌더
-            def _html_table(df_):
-                html = (
-                    df_.to_html(index=False, escape=False)
-                    .replace('<table border="1" class="dataframe">', '<table class="table" style="width:100%; border-collapse:collapse;">')
-                    .replace('<th>', '<th style="text-align:center; padding:6px; border-bottom:1px solid #ddd;">')
-                    .replace('<td>', '<td style="text-align:center; padding:6px; border-bottom:1px solid #f0f0f0;">')
-                )
-                return html
+            styled = (
+                num_df
+                .style
+                .apply(highlight_row_max, axis=1)
+                .format({c: "{:.1f}%" for c in value_cols}, na_rep="-")
+                .format({"순위": "{:d}"})
+            )
 
-            st.markdown(_html_table(disp_df), unsafe_allow_html=True)
+            # 5) 클릭 정렬 가능한 표 출력 (Styler 사용 시 column_config는 생략)
+            st.dataframe(
+                styled,
+                hide_index=True,
+                use_container_width=True,
+                height=600,
+            )
 
-        # (우) 한국 상위/하위 10
         with narrow_right:
-            st.markdown("#### 🏆 한국 상위 기술분야 (TOP 10)")
-            top_categories = category_data.nlargest(10, 'kr_tech_level')
-            top_table = []
-            for _, row in top_categories.iterrows():
-                top_table.append({
-                    '구분': "⚡ 감축" if row['type'] == '감축' else "🛡️ 적응",
-                    '중분류': row['tech_category'],
-                    '기술수준(%)': f"{row['kr_tech_level']:.1f}%",
-                    '기술격차(년)': f"{row['kr_tech_gap']:.1f}년"
-                })
-            st.dataframe(pd.DataFrame(top_table), hide_index=True, height=260)
+            st.markdown("#### 🏆 국가별 상위/하위 기술분야")
+            sel_country_tb = st.selectbox("국가 선택", all_countries, index=0, key="topbottom_country")
+            col_code = {'한국': 'kr', '중국': 'cn', '일본': 'jp', '미국': 'us', 'EU': 'eu'}[sel_country_tb]
+            level_col = f"{col_code}_tech_level"
+            gap_col = f"{col_code}_tech_gap" if f"{col_code}_tech_gap" in category_data.columns else None
 
-            st.markdown("#### 📈 한국 개선 필요 분야 (하위 10)")
-            bottom_categories = category_data.nsmallest(10, 'kr_tech_level')
-            bottom_table = []
-            for _, row in bottom_categories.iterrows():
-                bottom_table.append({
-                    '구분': "⚡ 감축" if row['type'] == '감축' else "🛡️ 적응",
-                    '중분류': row['tech_category'],
-                    '기술수준(%)': f"{row['kr_tech_level']:.1f}%",
-                    '기술격차(년)': f"{row['kr_tech_gap']:.1f}년"
-                })
-            st.dataframe(pd.DataFrame(bottom_table), hide_index=True, height=260)
+            # Top 10
+            st.markdown("**상위 10 (기술수준 높은 순)**")
+            top_tbl = (
+                category_data[['type', 'tech_category', level_col] + ([gap_col] if gap_col else [])]
+                .dropna(subset=[level_col])
+                .sort_values(level_col, ascending=False)
+                .head(10)
+                .rename(columns={'type': '구분', 'tech_category': '중분류', level_col: '기술수준(%)'})
+            )
+            if gap_col: top_tbl = top_tbl.rename(columns={gap_col: '기술격차(년)'})
+            top_tbl['구분'] = top_tbl['구분'].map({'감축': '⚡ 감축', '적응': '🛡️ 적응'})
+            top_tbl['기술수준(%)'] = top_tbl['기술수준(%)'].map(lambda x: f"{x:.1f}%")
+            if gap_col: top_tbl['기술격차(년)'] = top_tbl['기술격차(년)'].map(lambda x: f"{x:.1f}년")
+            st.dataframe(top_tbl, hide_index=True, height=260)
+
+            # Bottom 10
+            st.markdown("**개선 필요 10 (기술수준 낮은 순)**")
+            bot_tbl = (
+                category_data[['type', 'tech_category', level_col] + ([gap_col] if gap_col else [])]
+                .dropna(subset=[level_col])
+                .sort_values(level_col, ascending=True)
+                .head(10)
+                .rename(columns={'type': '구분', 'tech_category': '중분류', level_col: '기술수준(%)'})
+            )
+            if gap_col: bot_tbl = bot_tbl.rename(columns={gap_col: '기술격차(년)'})
+            bot_tbl['구분'] = bot_tbl['구분'].map({'감축': '⚡ 감축', '적응': '🛡️ 적응'})
+            bot_tbl['기술수준(%)'] = bot_tbl['기술수준(%)'].map(lambda x: f"{x:.1f}%")
+            if gap_col: bot_tbl['기술격차(년)'] = bot_tbl['기술격차(년)'].map(lambda x: f"{x:.1f}년")
+            st.dataframe(bot_tbl, hide_index=True, height=260)
 
         # ─────────────────────────────────────────
         # 분석(3패널) 섹션 — 상단 컨트롤 + 3패널
@@ -543,42 +595,43 @@ def main():
         with ctrl_col1:
             sel_country = st.selectbox("🌍 분석 국가", options=all_countries, index=0, key="prof_country_only")
 
+        # ===== 분석 컨트롤 =====
         with ctrl_col2:
-            scope = st.selectbox("📊 분석 범위", ['전체', '감축기술', '적응기술'], key="prof_scope_only")
-
-        # 범위 필터 (중분류 테이블: category_data)
-        if scope == '전체':
-            scoped_cat = category_data.copy()
-        elif scope == '감축기술':
-            scoped_cat = category_data[category_data['type'] == '감축']
-        else:
-            scoped_cat = category_data[category_data['type'] == '적응']
-
-        # 세부기술 후보(df 기반)
-        if scope == '전체':
-            detail_scope_df = df.copy()
-        else:
-            scoped_cats = set(scoped_cat['tech_category'].unique())
-            detail_scope_df = df[df['tech_category'].isin(scoped_cats)].copy()
+            compare_countries = st.multiselect(
+                "비교 국가 선택",
+                options=all_countries,  # ["한국","중국","일본","미국","EU"]
+                default=[sel_country],
+                key="cmp_countries_for_detail"
+            )
 
         with ctrl_col3:
-            detail_opts = sorted(detail_scope_df['tech_detail'].dropna().unique().tolist())
-            selected_details = st.multiselect("🎯 레이더 축(세부기술) 선택", options=detail_opts, default=[], key="prof_details_only")
+            # 범위(scope)에 맞는 중분류 목록 준비
+            scoped_cats = scoped_cat['tech_category'].unique().tolist()
+            # 44대 고정 순서 반영
+            cat_opts = [c for c in CATEGORY_ORDER if c in scoped_cats]
 
-        # ===== 3패널 =====
+            selected_mid = st.selectbox(
+                "🎯 레이더축(중분류) — 1개 선택",
+                options=cat_opts,
+                index=0 if cat_opts else None,
+                key="radar_mid_single"
+            )
+
+        # ---- 왼쪽 패널: 핵심지표 ----
         left_col, center_col, right_col = st.columns([1, 2, 1], gap="large")
 
         # (좌) 핵심지표
         with left_col:
             st.markdown("### 🧭 핵심지표")
             code = country_codes[sel_country]
-            avg_level = float(scoped_cat[f'{code}_tech_level'].mean()) if f'{code}_tech_level' in scoped_cat.columns else float('nan')
-            avg_gap = float(scoped_cat[f'{code}_tech_gap'].mean()) if f'{code}_tech_gap' in scoped_cat.columns else float('nan')
+            avg_level = float(
+                scoped_cat[f'{code}_tech_level'].mean()) if f'{code}_tech_level' in scoped_cat.columns else float('nan')
+            avg_gap = float(
+                scoped_cat[f'{code}_tech_gap'].mean()) if f'{code}_tech_gap' in scoped_cat.columns else float('nan')
             lead_cnt = int((scoped_cat['leading_country'] == sel_country).sum())
             total_cnt = int(len(scoped_cat))
-            top_cat = "–"
-            if f'{code}_tech_level' in scoped_cat.columns and not scoped_cat.empty:
-                top_cat = str(scoped_cat.loc[scoped_cat[f'{code}_tech_level'].idxmax(), 'tech_category'])
+            top_cat = str(scoped_cat.loc[scoped_cat[f'{code}_tech_level'].idxmax(), 'tech_category']) if (
+                        f'{code}_tech_level' in scoped_cat.columns and not scoped_cat.empty) else "–"
 
             c1, c2 = st.columns(2)
             with c1:
@@ -590,65 +643,93 @@ def main():
                           delta="우수" if (not pd.isna(avg_gap) and avg_gap < 3) else "보통")
                 st.metric("🏆 최우수 중분류", top_cat[:12] + "..." if len(top_cat) > 12 else top_cat)
 
-        # (중앙) 선택국가 중분류 랭킹 (Top 12) — 세로막대
         with center_col:
-            import plotly.express as px
-            st.markdown("### 📊 중분류 랭킹 (Top 12)")
-            if f'{code}_tech_level' in scoped_cat.columns:
-                rank_df = (
-                    scoped_cat[['tech_category', f'{code}_tech_level']]
-                    .rename(columns={f'{code}_tech_level': 'level'})
-                    .dropna(subset=['level'])
-                    .sort_values('level', ascending=False)
-                    .head(12)
-                )
-                fig_bar = px.bar(
-                    rank_df,
-                    x='tech_category', y='level',
-                    labels={'level': '기술수준(%)', 'tech_category': '중분류'}
-                )
-                fig_bar.update_layout(height=420, margin=dict(l=10, r=10, t=30, b=10), xaxis_tickangle=-30)
-                st.plotly_chart(fig_bar, use_container_width=True, config={'displayModeBar': False})
-            else:
-                st.caption("※ 선택 국가의 기술수준 컬럼이 없어 랭킹 차트를 생성할 수 없습니다.")
+            st.markdown("### 🧭 레이더 — 선택한 중분류의 세부기술 비교")
 
-        # (우) 레이더(세부기술) — 단일 국가 기준
-        with right_col:
-            import plotly.graph_objects as go
-            st.markdown("### 🧭 레이더(세부기술)")
-            # 자동 상위 8 축: 선택 없을 때, 선택국 기준
-            if not selected_details:
-                if f'{code}_tech_level' in detail_scope_df.columns:
-                    auto_top = (
-                        detail_scope_df
-                        .dropna(subset=[f'{code}_tech_level'])
-                        .nlargest(8, f'{code}_tech_level')
-                    )
+            if not selected_mid:
+                st.info("중분류를 선택하세요.")
+            else:
+                # 분석범위 + 중분류 필터
+                if scope == '전체':
+                    det_src = detail_data[detail_data['tech_category'] == selected_mid].copy()
+                elif scope == '감축기술':
+                    det_src = detail_data[
+                        (detail_data['tech_category'] == selected_mid) & (detail_data['type'] == '감축')].copy()
                 else:
-                    auto_top = detail_scope_df.head(8)
-                radar_details = auto_top['tech_detail'].tolist()
-                st.caption(f"※ 자동 축(상위 8, {sel_country} 기준): {', '.join(radar_details)}")
+                    det_src = detail_data[
+                        (detail_data['tech_category'] == selected_mid) & (detail_data['type'] == '적응')].copy()
+
+                theta = det_src['tech_detail'].tolist()
+
+                if len(theta) == 0:
+                    st.warning("선택한 중분류에 해당 범위의 세부기술 데이터가 없습니다.")
+                else:
+                    fig_rad = go.Figure()
+                    for ctry in compare_countries:
+                        code = country_codes[ctry]  # {'한국':'kr',...}
+                        col = f"{code}_tech_level"
+                        r_vals = det_src[col].fillna(0.0).astype(float).tolist()
+                        fig_rad.add_trace(go.Scatterpolar(
+                            r=r_vals, theta=theta, fill='toself', name=ctry, opacity=0.6
+                        ))
+                    fig_rad.update_layout(
+                        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                        showlegend=True, height=560,
+                        title=f"{selected_mid} — 세부기술 레이더(범위: {scope})"
+                    )
+                    st.plotly_chart(fig_rad, use_container_width=True, config={'displayModeBar': False})
+
+        # -----------------------------------------------------------------------------------------------------------------------
+
+        with right_col:
+            import plotly.express as px
+            st.markdown("### 📊 세부기술별 국가 비교 — 그룹 막대")
+
+            if not selected_mid:
+                st.info("중분류를 선택하세요.")
             else:
-                radar_details = selected_details
+                # 동일 소스 재사용
+                if scope == '전체':
+                    det_src = detail_data[detail_data['tech_category'] == selected_mid].copy()
+                elif scope == '감축기술':
+                    det_src = detail_data[
+                        (detail_data['tech_category'] == selected_mid) & (detail_data['type'] == '감축')].copy()
+                else:
+                    det_src = detail_data[
+                        (detail_data['tech_category'] == selected_mid) & (detail_data['type'] == '적응')].copy()
 
-            series_country, labels = [], []
-            for tech in radar_details:
-                row = detail_scope_df[detail_scope_df['tech_detail'] == tech]
-                val = float(row.iloc[0][f'{code}_tech_level']) if (not row.empty and f'{code}_tech_level' in row.columns) else 0.0
-                series_country.append(val)
-                labels.append(tech[:12] + "..." if len(tech) > 12 else tech)
+                # Long 변환
+                recs = []
+                code_map = {'한국': 'kr', '중국': 'cn', '일본': 'jp', '미국': 'us', 'EU': 'eu'}
+                for _, r in det_src.iterrows():
+                    for c in compare_countries:
+                        col = f"{code_map[c]}_tech_level"
+                        if col in det_src.columns:
+                            v = float(r.get(col, float('nan')))
+                            recs.append({"세부기술": r['tech_detail'], "국가": c, "기술수준(%)": v})
+                df_bar = pd.DataFrame(recs).dropna(subset=["기술수준(%)"])
 
-            fig_rad = go.Figure()
-            fig_rad.add_trace(go.Scatterpolar(r=series_country, theta=labels, fill='toself',
-                                              name=sel_country, opacity=0.6))
-            fig_rad.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                showlegend=True, height=520,
-                title=f"레이더(축: 세부기술) — {sel_country}"
-            )
-            st.plotly_chart(fig_rad, use_container_width=True, config={'displayModeBar': False})
+                if df_bar.empty:
+                    st.warning("선택한 국가들의 세부기술 데이터가 없습니다.")
+                else:
+                    fig_bar = px.bar(
+                        df_bar,
+                        x="세부기술",
+                        y="기술수준(%)",
+                        color="국가",
+                        barmode="group",
+                        text=df_bar["기술수준(%)"].map(lambda x: f"{x:.1f}%")
+                    )
+                    fig_bar.update_traces(textposition='outside', cliponaxis=False)
+                    fig_bar.update_layout(
+                        yaxis=dict(range=[0, 100]),
+                        height=560,
+                        margin=dict(t=60, r=20, b=40, l=40),
+                        title=f"{selected_mid} — 세부기술별 국가 비교(범위: {scope})"
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True, config={'displayModeBar': False})
 
-#-----------------------------------------------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------------------------------------------
     # 기술분야별 분석 - 2안(3패널 레이아웃)
     elif analysis_type == "🔬 기술분야별 분석":
         st.subheader("🔬 기술분야별 상세 분석")
